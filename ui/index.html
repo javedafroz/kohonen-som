@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kohonen SOM</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <!-- keycloak-js loaded as ESM below -->
+  <style>
+    :root {
+      --bg: #f3efe6;
+      --ink: #1a1f1c;
+      --muted: #5c675f;
+      --panel: #fffdf8;
+      --line: #d4cbb8;
+      --accent: #0f6b4c;
+      --accent-ink: #fffdf8;
+      --danger: #9b2c2c;
+      --shadow: 0 1px 0 rgba(26, 31, 28, 0.06);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "IBM Plex Sans", system-ui, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(ellipse 80% 50% at 10% -10%, #e4f0e8 0%, transparent 55%),
+        radial-gradient(ellipse 60% 40% at 100% 0%, #efe6d4 0%, transparent 50%),
+        var(--bg);
+    }
+
+    .wrap {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 2.5rem 1.25rem 4rem;
+    }
+
+    header {
+      margin-bottom: 2rem;
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+
+    header h1 {
+      margin: 0 0 0.35rem;
+      font-size: clamp(1.75rem, 3vw, 2.25rem);
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+
+    header p {
+      margin: 0;
+      color: var(--muted);
+      max-width: 36rem;
+      line-height: 1.5;
+    }
+
+    .user-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      font-size: 0.9rem;
+    }
+
+    .user-bar span {
+      color: var(--muted);
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.8rem;
+    }
+
+    .user-bar button {
+      margin: 0;
+      width: auto;
+      padding: 0.45rem 0.85rem;
+      background: transparent;
+      color: var(--ink);
+      border: 1px solid var(--line);
+      font-weight: 500;
+    }
+
+    .layout {
+      display: grid;
+      gap: 1.5rem;
+      grid-template-columns: 1fr;
+    }
+
+    @media (min-width: 900px) {
+      .layout {
+        grid-template-columns: minmax(280px, 360px) 1fr;
+        align-items: start;
+      }
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      padding: 1.25rem 1.35rem 1.5rem;
+    }
+
+    .panel h2 {
+      margin: 0 0 1rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+    }
+
+    label {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 500;
+      margin: 0.85rem 0 0.35rem;
+    }
+
+    label:first-of-type { margin-top: 0; }
+
+    input[type="text"],
+    input[type="number"],
+    input[type="file"],
+    textarea {
+      width: 100%;
+      font: inherit;
+      font-size: 0.95rem;
+      padding: 0.55rem 0.65rem;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+    }
+
+    textarea {
+      min-height: 4.5rem;
+      resize: vertical;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.85rem;
+    }
+
+    .hint {
+      margin: 0.3rem 0 0;
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+    }
+
+    .checks {
+      display: flex;
+      gap: 1.25rem;
+      margin-top: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .checks label {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      margin: 0;
+      font-weight: 400;
+      cursor: pointer;
+    }
+
+    button {
+      margin-top: 1.25rem;
+      width: 100%;
+      border: none;
+      background: var(--accent);
+      color: var(--accent-ink);
+      font: inherit;
+      font-weight: 600;
+      padding: 0.75rem 1rem;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
+    button:not(:disabled):hover {
+      filter: brightness(1.05);
+    }
+
+    .status {
+      margin-top: 0.85rem;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.8rem;
+      color: var(--muted);
+      min-height: 1.2em;
+    }
+
+    .status.error { color: var(--danger); }
+    .status.ok { color: var(--accent); }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      padding: 0.75rem;
+      background: #faf7f0;
+    }
+
+    .metric .k {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+    }
+
+    .metric .v {
+      margin-top: 0.25rem;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.95rem;
+      font-weight: 500;
+      word-break: break-all;
+    }
+
+    .gallery {
+      display: grid;
+      gap: 1.25rem;
+    }
+
+    @media (min-width: 700px) {
+      .gallery { grid-template-columns: 1fr 1fr; }
+    }
+
+    figure {
+      margin: 0;
+      border: 1px solid var(--line);
+      background: #fff;
+    }
+
+    figure img {
+      display: block;
+      width: 100%;
+      height: auto;
+      background: #eee;
+      min-height: 120px;
+    }
+
+    figcaption {
+      padding: 0.65rem 0.75rem;
+      border-top: 1px solid var(--line);
+      font-size: 0.8rem;
+    }
+
+    figcaption a {
+      color: var(--accent);
+      word-break: break-all;
+    }
+
+    .empty {
+      color: var(--muted);
+      font-size: 0.95rem;
+      line-height: 1.5;
+      padding: 0.25rem 0;
+    }
+
+    .hidden { display: none !important; }
+
+    #boot {
+      min-height: 60vh;
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.9rem;
+    }
+
+    .btn-row {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-top: 1.25rem;
+    }
+
+    .btn-row button {
+      margin-top: 0;
+      flex: 1;
+    }
+
+    .spinner {
+      width: 1.15rem;
+      height: 1.15rem;
+      border: 2px solid var(--line);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      flex-shrink: 0;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .loading-panel {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.85rem;
+      min-height: 12rem;
+      border: 1px dashed var(--line);
+      background: #faf7f0;
+      color: var(--muted);
+      font-size: 0.9rem;
+      text-align: center;
+      padding: 1.5rem;
+    }
+
+    .loading-panel .spinner {
+      width: 2rem;
+      height: 2rem;
+      border-width: 3px;
+    }
+
+    .loading-panel strong {
+      display: block;
+      color: var(--ink);
+      font-weight: 600;
+      margin-bottom: 0.15rem;
+    }
+  </style>
+</head>
+<body>
+  <div id="boot">Signing in with Keycloak…</div>
+
+  <div id="app" class="wrap hidden">
+    <header>
+      <div>
+        <h1>Kohonen SOM</h1>
+        <p>Upload a numeric CSV, choose features, train a self-organising map, and inspect the MinIO artifacts.</p>
+      </div>
+      <div class="user-bar">
+        <span id="username"></span>
+        <button type="button" id="logout">Log out</button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <section class="panel">
+        <h2>Train</h2>
+        <form id="train-form">
+          <label for="file">CSV file</label>
+          <input id="file" name="file" type="file" accept=".csv,text/csv" required />
+
+          <label for="feature_columns">Feature columns</label>
+          <textarea id="feature_columns" name="feature_columns" required placeholder="sepal_length, sepal_width, petal_length, petal_width"></textarea>
+          <p class="hint">Comma-separated or JSON array. Must be numeric columns.</p>
+
+          <label for="label_column">Label column (optional)</label>
+          <input id="label_column" name="label_column" type="text" placeholder="species" />
+
+          <div class="grid-2">
+            <div>
+              <label for="width">Width</label>
+              <input id="width" name="width" type="number" min="2" value="10" required />
+            </div>
+            <div>
+              <label for="height">Height</label>
+              <input id="height" name="height" type="number" min="2" value="10" required />
+            </div>
+          </div>
+
+          <div class="grid-2">
+            <div>
+              <label for="n_iterations">Iterations</label>
+              <input id="n_iterations" name="n_iterations" type="number" min="1" value="500" required />
+            </div>
+            <div>
+              <label for="seed">Seed</label>
+              <input id="seed" name="seed" type="number" value="42" />
+            </div>
+          </div>
+
+          <div class="checks">
+            <label><input type="checkbox" id="scale" checked /> Scale features</label>
+            <label><input type="checkbox" id="online" /> Online sampling</label>
+          </div>
+
+          <div class="btn-row">
+            <button id="submit" type="submit">Submit</button>
+            <div id="btn-spinner" class="spinner hidden" aria-hidden="true"></div>
+          </div>
+          <div id="status" class="status" aria-live="polite"></div>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>Results</h2>
+        <div id="empty" class="empty">No run yet. Submit a CSV to see component planes and BMU projection.</div>
+        <div id="loading" class="loading-panel hidden" role="status" aria-live="polite">
+          <div class="spinner" aria-hidden="true"></div>
+          <div>
+            <strong>Training SOM…</strong>
+            Fitting the map and uploading artifacts to MinIO.
+          </div>
+        </div>
+        <div id="results" class="hidden">
+          <div class="metrics" id="metrics"></div>
+          <div class="gallery" id="gallery"></div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script type="module">
+    import Keycloak from "/static/vendor/keycloak.js";
+
+    const bootEl = document.getElementById("boot");
+    const appEl = document.getElementById("app");
+    const form = document.getElementById("train-form");
+    const statusEl = document.getElementById("status");
+    const submitBtn = document.getElementById("submit");
+    const btnSpinner = document.getElementById("btn-spinner");
+    const emptyEl = document.getElementById("empty");
+    const loadingEl = document.getElementById("loading");
+    const resultsEl = document.getElementById("results");
+    const metricsEl = document.getElementById("metrics");
+    const galleryEl = document.getElementById("gallery");
+    const usernameEl = document.getElementById("username");
+    const logoutBtn = document.getElementById("logout");
+
+    let keycloak = null;
+
+    function setLoading(isLoading) {
+      submitBtn.disabled = isLoading;
+      btnSpinner.classList.toggle("hidden", !isLoading);
+      loadingEl.classList.toggle("hidden", !isLoading);
+      if (isLoading) {
+        emptyEl.classList.add("hidden");
+        resultsEl.classList.add("hidden");
+        submitBtn.textContent = "Submitting…";
+      } else {
+        submitBtn.textContent = "Submit";
+      }
+    }
+
+    function setStatus(message, kind) {
+      statusEl.textContent = message;
+      statusEl.className = "status" + (kind ? " " + kind : "");
+    }
+
+    function metric(label, value) {
+      const div = document.createElement("div");
+      div.className = "metric";
+      div.innerHTML = `<div class="k">${label}</div><div class="v">${value}</div>`;
+      return div;
+    }
+
+    function figure(title, artifact) {
+      const fig = document.createElement("figure");
+      const img = document.createElement("img");
+      img.src = artifact.url;
+      img.alt = title;
+      img.loading = "lazy";
+      const cap = document.createElement("figcaption");
+      cap.innerHTML = `<strong>${title}</strong><br/><a href="${artifact.url}" target="_blank" rel="noopener">${artifact.path}</a>`;
+      fig.appendChild(img);
+      fig.appendChild(cap);
+      return fig;
+    }
+
+    function formatError(detail) {
+      if (typeof detail === "string") return detail;
+      if (Array.isArray(detail)) {
+        return detail.map((d) => d.msg || JSON.stringify(d)).join("; ");
+      }
+      return "Request failed";
+    }
+
+    // Break iss= redirect loops left by incompatible adapters / interrupted logins
+    function clearBrokenAuthUrl() {
+      const hash = window.location.hash.startsWith("#")
+        ? window.location.hash.slice(1)
+        : "";
+      const hashParams = new URLSearchParams(hash);
+      const queryParams = new URLSearchParams(window.location.search);
+      const issCount =
+        hashParams.getAll("iss").length + queryParams.getAll("iss").length;
+      const hasCode = hashParams.has("code") || queryParams.has("code");
+      const tooLong =
+        window.location.href.length > 2000 || issCount > 1;
+
+      if (tooLong || (issCount > 0 && !hasCode && !hashParams.has("state") && !queryParams.has("state"))) {
+        history.replaceState(null, "", window.location.pathname);
+      }
+    }
+
+    async function authHeader() {
+      if (!keycloak) throw new Error("Not authenticated");
+      try {
+        await keycloak.updateToken(30);
+      } catch (err) {
+        await keycloak.login();
+        throw err;
+      }
+      return { Authorization: `Bearer ${keycloak.token}` };
+    }
+
+    async function start() {
+      clearBrokenAuthUrl();
+
+      const cfgRes = await fetch("/config");
+      if (!cfgRes.ok) throw new Error("Could not load auth config");
+      const cfg = await cfgRes.json();
+
+      keycloak = new Keycloak({
+        url: cfg.keycloak.url,
+        realm: cfg.keycloak.realm,
+        clientId: cfg.keycloak.clientId,
+      });
+
+      const authenticated = await keycloak.init({
+        onLoad: "login-required",
+        pkceMethod: "S256",
+        checkLoginIframe: false,
+        // Avoid fragment/iss loops with Keycloak 26
+        responseMode: "query",
+      });
+
+      if (!authenticated) {
+        bootEl.textContent = "Authentication required.";
+        return;
+      }
+
+      // Strip leftover OIDC callback params from the address bar
+      if (window.location.search || window.location.hash) {
+        history.replaceState(null, "", window.location.pathname);
+      }
+
+      usernameEl.textContent = keycloak.tokenParsed?.preferred_username || "user";
+      bootEl.classList.add("hidden");
+      appEl.classList.remove("hidden");
+    }
+
+    logoutBtn.addEventListener("click", () => {
+      keycloak.logout({ redirectUri: window.location.origin + "/" });
+    });
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const fileInput = document.getElementById("file");
+      if (!fileInput.files.length) {
+        setStatus("Choose a CSV file.", "error");
+        return;
+      }
+
+      const body = new FormData();
+      body.append("file", fileInput.files[0]);
+      body.append("feature_columns", document.getElementById("feature_columns").value.trim());
+      const label = document.getElementById("label_column").value.trim();
+      if (label) body.append("label_column", label);
+      body.append("width", document.getElementById("width").value);
+      body.append("height", document.getElementById("height").value);
+      body.append("n_iterations", document.getElementById("n_iterations").value);
+      const seed = document.getElementById("seed").value;
+      if (seed !== "") body.append("seed", seed);
+      body.append("scale", document.getElementById("scale").checked ? "true" : "false");
+      body.append("online", document.getElementById("online").checked ? "true" : "false");
+
+      submitBtn.disabled = true;
+      setStatus("Training… this can take a moment.", "");
+      setLoading(true);
+
+      try {
+        const headers = await authHeader();
+        const res = await fetch("/som/train", { method: "POST", body, headers });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(formatError(data.detail) || res.statusText);
+        }
+
+        metricsEl.innerHTML = "";
+        metricsEl.appendChild(metric("Job", data.job_id));
+        metricsEl.appendChild(metric("User", data.requested_by || "—"));
+        metricsEl.appendChild(metric("Samples", data.n_samples));
+        metricsEl.appendChild(metric("Features", data.n_features));
+        metricsEl.appendChild(metric("Map", data.map_size.join("×")));
+        metricsEl.appendChild(metric("QE", Number(data.quantization_error).toFixed(4)));
+
+        galleryEl.innerHTML = "";
+        if (data.artifacts?.components) {
+          galleryEl.appendChild(figure("Component planes", data.artifacts.components));
+        }
+        if (data.artifacts?.bmu) {
+          galleryEl.appendChild(figure("BMU projection", data.artifacts.bmu));
+        }
+
+        resultsEl.classList.remove("hidden");
+        setStatus("Done.", "ok");
+      } catch (err) {
+        emptyEl.classList.remove("hidden");
+        const message = typeof err.message === "string" ? err.message : "Training failed";
+        setStatus(message, "error");
+      } finally {
+        setLoading(false);
+      }
+    });
+
+    start().catch((err) => {
+      bootEl.textContent = "Login failed: " + (err.message || err);
+      console.error(err);
+    });
+  </script>
+</body>
+</html>

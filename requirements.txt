@@ -1,0 +1,7 @@
+numpy>=1.26
+matplotlib>=3.8
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+minio>=7.2
+PyJWT[crypto]>=2.9

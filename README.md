@@ -1,0 +1,274 @@
+# Kohonen Self-Organising Map Platform
+
+End-to-end platform for training **Kohonen Self-Organising Maps (SOMs)** on numeric CSV datasets. It includes a vectorized training engine, a secured HTTP API, a web dashboard, object storage for plot artifacts, and Keycloak-based authentication.
+
+---
+
+## Features
+
+- **Vectorized SOM training** for arbitrary numeric feature matrices `(N × D)`
+- **CSV → train → visualize** pipeline via `train_som_from_csv`
+- **Web dashboard** to upload data, configure hyperparameters, and view results
+- **REST API** (`POST /som/train`) with JWT protection
+- **MinIO** storage for component-plane and BMU plot artifacts
+- **Keycloak IAM** login before dashboard access
+- Baseline RGB demos preserved (`train` / `train_vectorized`) for the original challenge comparison
+
+---
+
+## Architecture
+
+```text
+Browser (UI)
+    │  Keycloak login (OIDC / PKCE)
+    ▼
+FastAPI (som-api :8000)
+    │  validates JWT via Keycloak JWKS
+    │  trains SOM (NumPy)
+    ▼
+MinIO (:9010)  ← PNG artifacts (public read URLs returned in API response)
+Keycloak (:8180)
+```
+
+| Service   | Role                         | URL                         |
+|-----------|------------------------------|-----------------------------|
+| Dashboard | Web UI                       | http://localhost:8000       |
+| API docs  | OpenAPI / Swagger            | http://localhost:8000/docs  |
+| Keycloak  | Identity provider            | http://localhost:8180       |
+| MinIO API | Object storage               | http://localhost:9010       |
+| MinIO UI  | Console                      | http://localhost:9011       |
+
+---
+
+## Quick start
+
+### Prerequisites
+
+- Docker and Docker Compose
+- Ports available: `8000`, `8180`, `9010`, `9011`
+
+### Run the stack
+
+```bash
+cd kohonen
+docker compose up -d --build
+```
+
+Wait ~30–60 seconds on first boot for Keycloak to import the realm, then open:
+
+**http://localhost:8000**
+
+### Demo credentials
+
+| System   | Username | Password   |
+|----------|----------|------------|
+| Dashboard (Keycloak) | `demo` | `demo` |
+| Keycloak admin       | `admin` | `admin` |
+| MinIO                | `minioadmin` | `minioadmin` |
+
+Stop the stack:
+
+```bash
+docker compose down
+```
+
+---
+
+## Using the dashboard
+
+1. Sign in with Keycloak (`demo` / `demo`).
+2. Upload a CSV with a header row (features must be numeric).
+3. Enter feature columns (comma-separated or JSON array).
+4. Optionally set a label column (used only for BMU coloring).
+5. Configure map size, iterations, seed, scaling, and online sampling.
+6. Click **Submit** — a loader shows while training runs.
+7. View metrics and MinIO-backed plots (component planes + BMU projection).
+
+**Example (Iris):**
+
+- Features: `sepal_length, sepal_width, petal_length, petal_width`
+- Label: `species`
+
+Sample data: [`../IRIS.csv`](../IRIS.csv)
+
+---
+
+## API
+
+Interactive docs: http://localhost:8000/docs
+
+### Public endpoints
+
+| Method | Path       | Description                |
+|--------|------------|----------------------------|
+| `GET`  | `/`        | Dashboard UI               |
+| `GET`  | `/health`  | Liveness / dependency info |
+| `GET`  | `/config`  | Public OIDC client config  |
+
+### Authenticated endpoints
+
+Require `Authorization: Bearer <access_token>`.
+
+| Method | Path         | Description                          |
+|--------|--------------|--------------------------------------|
+| `GET`  | `/me`        | Current user claims                  |
+| `POST` | `/som/train` | Train SOM from uploaded CSV          |
+
+### Train request (multipart form)
+
+| Field              | Required | Description                                      |
+|--------------------|----------|--------------------------------------------------|
+| `file`             | yes      | CSV upload                                       |
+| `feature_columns`  | yes      | JSON array or comma-separated names              |
+| `label_column`     | no       | Label for BMU coloring                           |
+| `width` / `height` | no       | Map size (default `10`)                          |
+| `n_iterations`     | no       | Training iterations (default `1000`)             |
+| `seed`             | no       | RNG seed (default `42`)                          |
+| `scale`            | no       | Z-score features (default `true`)                |
+| `online`           | no       | One random sample per iteration (default `false`)|
+| `alpha0`           | no       | Initial learning rate (default `0.1`)            |
+
+### Example response (`artifacts`)
+
+```json
+{
+  "job_id": "9cd0b11aca2e",
+  "requested_by": "demo",
+  "quantization_error": 0.38,
+  "artifacts": {
+    "components": {
+      "path": "s3://som-artifacts/9cd0b11aca2e/som_components.png",
+      "object_key": "9cd0b11aca2e/som_components.png",
+      "url": "http://localhost:9010/som-artifacts/9cd0b11aca2e/som_components.png"
+    },
+    "bmu": {
+      "path": "s3://som-artifacts/9cd0b11aca2e/som_bmu.png",
+      "object_key": "9cd0b11aca2e/som_bmu.png",
+      "url": "http://localhost:9010/som-artifacts/9cd0b11aca2e/som_bmu.png"
+    }
+  }
+}
+```
+
+### Example `curl` (password grant for automation)
+
+```bash
+TOKEN=$(curl -s -X POST "http://localhost:8180/realms/som/protocol/openid-connect/token" \
+  -d "client_id=som-ui" \
+  -d "username=demo" \
+  -d "password=demo" \
+  -d "grant_type=password" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+curl -X POST "http://localhost:8000/som/train" \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@../IRIS.csv" \
+  -F 'feature_columns=["sepal_length","sepal_width","petal_length","petal_width"]' \
+  -F "label_column=species" \
+  -F "width=10" \
+  -F "height=10" \
+  -F "n_iterations=500"
+```
+
+---
+
+## Python library
+
+Core logic lives in [`kohonen.py`](kohonen.py).
+
+| Symbol                 | Purpose                                              |
+|------------------------|------------------------------------------------------|
+| `train`                | Original nested-loop RGB trainer (baseline)          |
+| `train_vectorized`     | Same semantics, NumPy-vectorized updates             |
+| `SOM`                  | Generic map for any `(N, D)` numeric matrix          |
+| `load_numeric_csv`     | Load features (+ optional label) from CSV            |
+| `train_som_from_csv`   | End-to-end: load → fit → plots → metrics             |
+
+```python
+from kohonen import train_som_from_csv
+
+result = train_som_from_csv(
+    "path/to/data.csv",
+    feature_columns=["f1", "f2", "f3"],
+    label_column="label",  # optional
+    width=10,
+    height=10,
+    n_iterations=1000,
+    seed=42,
+    output_dir="./out",
+)
+print(result["quantization_error"], result["artifacts"])
+```
+
+Local install (optional, without Docker):
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+---
+
+## Project structure
+
+```text
+kohonen/
+├── api.py                 # FastAPI app (auth, train, UI, MinIO upload)
+├── kohonen.py             # SOM algorithms + CSV helper + train_som_from_csv
+├── ui/
+│   ├── index.html         # Dashboard
+│   └── vendor/            # Keycloak JS adapter
+├── keycloak/
+│   └── som-realm.json     # Realm, client, demo user
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+└── README.md
+```
+
+---
+
+## Configuration
+
+Environment variables for `som-api` (see `docker-compose.yml`):
+
+| Variable | Description |
+|----------|-------------|
+| `MINIO_ENDPOINT` | Internal MinIO host (`minio:9000`) |
+| `MINIO_PUBLIC_URL` | Browser-reachable MinIO base (`http://localhost:9010`) |
+| `MINIO_BUCKET` | Artifact bucket (`som-artifacts`) |
+| `KEYCLOAK_URL` | Browser-facing Keycloak URL |
+| `KEYCLOAK_INTERNAL_URL` | In-cluster Keycloak URL for JWKS |
+| `KEYCLOAK_REALM` | Realm name (`som`) |
+| `KEYCLOAK_CLIENT_ID` | Public OIDC client (`som-ui`) |
+
+---
+
+## Performance notes
+
+Measured on the original RGB challenge path (same machine):
+
+| Implementation   | Map / iterations     | Wall time |
+|------------------|----------------------|-----------|
+| `train` (loops)  | 100×100 / 1000       | ~154 s    |
+| `train_vectorized` | 100×100 / 1000     | ~1.8 s    |
+
+Complexity remains `O(I · N · W · H · D)`; vectorization removes Python grid-loop overhead. Use `online=True` for large `N`.
+
+---
+
+## Security notes (demo stack)
+
+This compose stack is intended for **local development / challenge demos**:
+
+- Default passwords are intentionally simple
+- MinIO bucket policy allows public read of artifacts
+- Keycloak runs in `start-dev` mode
+
+Do not expose these defaults on a public network without hardening credentials, TLS, and bucket policies.
+
+---
+
+## License
+
+Provided as part of the Mantel / Kohonen SOM challenge workspace. Adapt as needed for your submission or productisation review.

@@ -1,0 +1,59 @@
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9010:9000"
+      - "9011:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm"]
+    ports:
+      - "8180:8080"
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_PORT: "8180"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import
+    restart: unless-stopped
+
+  som-api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - som_artifacts:/app/artifacts
+    environment:
+      MPLBACKEND: Agg
+      ARTIFACT_ROOT: /app/artifacts
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: som-artifacts
+      MINIO_SECURE: "false"
+      MINIO_PUBLIC_URL: http://localhost:9010
+      KEYCLOAK_URL: http://localhost:8180
+      KEYCLOAK_INTERNAL_URL: http://keycloak:8080
+      KEYCLOAK_REALM: som
+      KEYCLOAK_CLIENT_ID: som-ui
+    depends_on:
+      - minio
+      - keycloak
+    restart: unless-stopped
+
+volumes:
+  som_artifacts:
+  minio_data:
