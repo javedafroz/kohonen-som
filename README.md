@@ -42,16 +42,28 @@ kohonen/
 
 ## Architecture
 
-```text
-Browser (apps/web)
-    │  Keycloak login (OIDC / PKCE)
-    ▼
-FastAPI (apps/api :8000)
-    │  validates JWT via Keycloak JWKS
-    │  trains via packages/som_core
-    ▼
-MinIO (:9010)  ← PNG artifacts (URLs returned in API response)
-Keycloak (:8180)
+```mermaid
+flowchart TB
+  subgraph Client
+    Browser["Browser<br/>apps/web"]
+  end
+
+  subgraph Platform
+    API["FastAPI<br/>apps/api :8000"]
+    Core["som_core<br/>packages/som_core"]
+  end
+
+  subgraph Infra
+    KC["Keycloak<br/>:8180"]
+    MinIO["MinIO<br/>:9010"]
+  end
+
+  Browser -->|"OIDC / PKCE login"| KC
+  Browser -->|"JWT + train request"| API
+  API -->|"Validate JWT via JWKS"| KC
+  API -->|"Train SOM"| Core
+  API -->|"Upload PNG artifacts"| MinIO
+  Browser -->|"Fetch artifact URLs"| MinIO
 ```
 
 | Service   | Role                         | URL                         |
