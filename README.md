@@ -1,6 +1,6 @@
 # Kohonen Self-Organising Map Platform
 
-Monorepo for training **Kohonen Self-Organising Maps (SOMs)** on numeric CSV datasets. It includes a shared training library, a secured HTTP API, a web dashboard, object storage for plot artifacts, and Keycloak-based authentication.
+A platform for training **Kohonen Self-Organising Maps (SOMs)** on numeric CSV datasets. It includes a shared training library, a secured HTTP API, a web dashboard, object storage for plot artifacts, and Keycloak-based authentication.
 
 ---
 
@@ -256,6 +256,10 @@ Environment variables for `som-api` (see `docker-compose.yml`):
 | Variable | Description |
 |----------|-------------|
 | `WEB_ROOT` | Path to dashboard static files |
+| `WEB_CONCURRENCY` | Uvicorn worker processes (default `2`) |
+| `MAX_CONCURRENT_TRAINS` | Max concurrent train jobs **per worker** (default `2`) |
+| `TRAIN_QUEUE_TIMEOUT_SEC` | Wait time before `503` when at capacity (default `30`) |
+| `TRAIN_THREAD_WORKERS` | Thread pool size for training (default = max trains) |
 | `MINIO_ENDPOINT` | Internal MinIO host (`minio:9000`) |
 | `MINIO_PUBLIC_URL` | Browser-reachable MinIO base (`http://localhost:9010`) |
 | `MINIO_BUCKET` | Artifact bucket (`som-artifacts`) |
@@ -263,6 +267,13 @@ Environment variables for `som-api` (see `docker-compose.yml`):
 | `KEYCLOAK_INTERNAL_URL` | In-cluster Keycloak URL for JWKS |
 | `KEYCLOAK_REALM` | Realm name (`som`) |
 | `KEYCLOAK_CLIENT_ID` | Public OIDC client (`som-ui`) |
+
+### Concurrency model (minimal production)
+
+- Training runs in a **thread pool** so the API event loop stays responsive for auth/health/UI.
+- A **semaphore** caps concurrent trains per worker; excess requests wait up to `TRAIN_QUEUE_TIMEOUT_SEC`, then return **503**.
+- **Multiple Uvicorn workers** (`WEB_CONCURRENCY`) handle parallel users across processes.
+- Effective train capacity ≈ `WEB_CONCURRENCY × MAX_CONCURRENT_TRAINS` (tune to CPU).
 
 ---
 

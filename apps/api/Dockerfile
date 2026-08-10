@@ -4,7 +4,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     MPLBACKEND=Agg \
     ARTIFACT_ROOT=/app/artifacts \
-    WEB_ROOT=/app/web
+    WEB_ROOT=/app/web \
+    WEB_CONCURRENCY=2 \
+    MAX_CONCURRENT_TRAINS=2 \
+    TRAIN_QUEUE_TIMEOUT_SEC=30
 
 WORKDIR /app
 
@@ -27,4 +30,5 @@ RUN mkdir -p /app/artifacts
 
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Multiple workers for multi-user request handling; training is capped per worker
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-2}"]

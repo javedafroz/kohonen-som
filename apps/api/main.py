@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import shutil
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
@@ -48,8 +50,17 @@ KEYCLOAK_JWKS_URL = (
     f"{KEYCLOAK_INTERNAL_URL}/realms/{KEYCLOAK_REALM}/protocol/openid-connect/certs"
 )
 
+# Concurrency controls (per API process / uvicorn worker)
+MAX_CONCURRENT_TRAINS = max(1, int(os.getenv("MAX_CONCURRENT_TRAINS", "2")))
+TRAIN_QUEUE_TIMEOUT_SEC = float(os.getenv("TRAIN_QUEUE_TIMEOUT_SEC", "30"))
+TRAIN_THREAD_WORKERS = max(
+    1, int(os.getenv("TRAIN_THREAD_WORKERS", str(MAX_CONCURRENT_TRAINS)))
+)
+
 minio_client: Minio | None = None
 jwks_client: PyJWKClient | None = None
+train_semaphore: asyncio.Semaphore | None = None
+train_executor: ThreadPoolExecutor | None = None
 bearer_scheme = HTTPBearer(auto_error=True)
 
 
@@ -90,6 +101,61 @@ def upload_artifact(local_path: Path, object_key: str) -> dict:
     return {"path": path, "object_key": object_key, "url": url}
 
 
+def _run_training_job(
+    *,
+    csv_path: Path,
+    job_id: str,
+    job_dir: Path,
+    columns: list[str],
+    label_column: str | None,
+    width: int,
+    height: int,
+    n_iterations: int,
+    seed: int | None,
+    scale: bool,
+    online: bool,
+    alpha0: float,
+    requested_by: str | None,
+) -> dict[str, Any]:
+    """Blocking train + MinIO upload (runs in a worker thread)."""
+    result = train_som_from_csv(
+        csv_path,
+        feature_columns=columns,
+        label_column=label_column,
+        width=width,
+        height=height,
+        n_iterations=n_iterations,
+        seed=seed,
+        scale=scale,
+        online=online,
+        alpha0=alpha0,
+        output_dir=job_dir,
+    )
+
+    components_local = Path(result["artifacts"]["components"])
+    bmu_local = Path(result["artifacts"]["bmu"])
+    artifacts = {
+        "components": upload_artifact(
+            components_local, f"{job_id}/som_components.png"
+        ),
+        "bmu": upload_artifact(bmu_local, f"{job_id}/som_bmu.png"),
+    }
+    return {
+        "job_id": job_id,
+        "requested_by": requested_by,
+        "n_samples": result["n_samples"],
+        "n_features": result["n_features"],
+        "feature_columns": result["feature_columns"],
+        "label_column": result["label_column"],
+        "map_size": result["map_size"],
+        "n_iterations": result["n_iterations"],
+        "online": result["online"],
+        "quantization_error": result["quantization_error"],
+        "weights_shape": result["weights_shape"],
+        "artifacts": artifacts,
+    }
+
+
 def verify_token(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
 ) -> dict[str, Any]:
@@ -118,8 +184,20 @@ def verify_token(
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global minio_client, jwks_client
+    global minio_client, jwks_client, train_semaphore, train_executor
     ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
+    train_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TRAINS)
+    train_executor = ThreadPoolExecutor(
+        max_workers=TRAIN_THREAD_WORKERS,
+        thread_name_prefix="som-train",
+    )
+    logger.info(
+        "Concurrency: max_trains=%s queue_timeout=%ss thread_workers=%s",
+        MAX_CONCURRENT_TRAINS,
+        TRAIN_QUEUE_TIMEOUT_SEC,
+        TRAIN_THREAD_WORKERS,
+    )
+
     minio_client = Minio(
         MINIO_ENDPOINT,
         access_key=MINIO_ACCESS_KEY,
@@ -143,7 +221,6 @@ async def lifespan(_app: FastAPI):
     jwks_client = PyJWKClient(KEYCLOAK_JWKS_URL, cache_keys=True)
     for _ in range(60):
         try:
-            # Warm JWKS cache once Keycloak is import-ready
             jwks_client.fetch_data()
             last_error = None
             break
@@ -159,6 +236,9 @@ async def lifespan(_app: FastAPI):
         logger.info("Keycloak JWKS ready issuer=%s", KEYCLOAK_ISSUER)
 
     yield
+
+    if train_executor is not None:
+        train_executor.shutdown(wait=False, cancel_futures=True)
 
 
 app = FastAPI(
@@ -197,6 +277,7 @@ def health():
         "status": "ok",
         "minio_bucket": MINIO_BUCKET,
         "keycloak_issuer": KEYCLOAK_ISSUER,
+        "max_concurrent_trains": MAX_CONCURRENT_TRAINS,
     }
 
 
@@ -227,6 +308,9 @@ async def som_train(
     online: bool = Form(False),
     alpha0: float = Form(0.1),
 ):
+    if train_semaphore is None or train_executor is None:
+        raise HTTPException(status_code=503, detail="Training pool is not ready")
+
     columns = _parse_feature_columns(feature_columns)
     if not columns:
         raise HTTPException(status_code=400, detail="feature_columns must not be empty")
@@ -241,50 +325,57 @@ async def som_train(
     try:
         with csv_path.open("wb") as out:
             shutil.copyfileobj(file.file, out)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400, detail=f"Failed to store upload: {exc}"
+        ) from exc
 
-        result = train_som_from_csv(
-            csv_path,
-            feature_columns=columns,
-            label_column=label_column or None,
-            width=width,
-            height=height,
-            n_iterations=n_iterations,
-            seed=seed,
-            scale=scale,
-            online=online,
-            alpha0=alpha0,
-            output_dir=job_dir,
+    try:
+        await asyncio.wait_for(
+            train_semaphore.acquire(),
+            timeout=TRAIN_QUEUE_TIMEOUT_SEC,
         )
-
-        components_local = Path(result["artifacts"]["components"])
-        bmu_local = Path(result["artifacts"]["bmu"])
-        artifacts = {
-            "components": upload_artifact(
-                components_local, f"{job_id}/som_components.png"
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Too many concurrent training jobs "
+                f"(limit {MAX_CONCURRENT_TRAINS} per worker). Try again shortly."
             ),
-            "bmu": upload_artifact(bmu_local, f"{job_id}/som_bmu.png"),
-        }
+        ) from exc
+
+    loop = asyncio.get_running_loop()
+    try:
+        payload = await loop.run_in_executor(
+            train_executor,
+            lambda: _run_training_job(
+                csv_path=csv_path,
+                job_id=job_id,
+                job_dir=job_dir,
+                columns=columns,
+                label_column=label_column or None,
+                width=width,
+                height=height,
+                n_iterations=n_iterations,
+                seed=seed,
+                scale=scale,
+                online=online,
+                alpha0=alpha0,
+                requested_by=user.get("preferred_username") or user.get("sub"),
+            ),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except S3Error as exc:
-        raise HTTPException(status_code=502, detail=f"MinIO upload failed: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"MinIO upload failed: {exc}"
+        ) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        train_semaphore.release()
 
-    return {
-        "job_id": job_id,
-        "requested_by": user.get("preferred_username") or user.get("sub"),
-        "n_samples": result["n_samples"],
-        "n_features": result["n_features"],
-        "feature_columns": result["feature_columns"],
-        "label_column": result["label_column"],
-        "map_size": result["map_size"],
-        "n_iterations": result["n_iterations"],
-        "online": result["online"],
-        "quantization_error": result["quantization_error"],
-        "weights_shape": result["weights_shape"],
-        "artifacts": artifacts,
-    }
+    return payload
 
 
 def _parse_feature_columns(raw: str) -> list[str]:
