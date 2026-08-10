@@ -45,7 +45,7 @@ htmlcov/
 # Local artifacts and generated plots
 artifacts/
 *.png
-!ui/**/*.png
+!apps/web/**/*.png
 
 # Local MinIO / runtime dumps
 *.log

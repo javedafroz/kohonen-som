@@ -27,11 +27,13 @@ services:
       KC_HOSTNAME_STRICT_HTTPS: "false"
       KC_HEALTH_ENABLED: "true"
     volumes:
-      - ./keycloak:/opt/keycloak/data/import
+      - ./infra/keycloak:/opt/keycloak/data/import
     restart: unless-stopped
 
   som-api:
-    build: .
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
     ports:
       - "8000:8000"
     volumes:
@@ -39,6 +41,7 @@ services:
     environment:
       MPLBACKEND: Agg
       ARTIFACT_ROOT: /app/artifacts
+      WEB_ROOT: /app/web
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin

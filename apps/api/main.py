@@ -21,9 +21,11 @@ from jwt import PyJWKClient
 from minio import Minio
 from minio.error import S3Error
 
-from kohonen import train_som_from_csv
+from som_core import train_som_from_csv
 
-UI_DIR = Path(__file__).resolve().parent / "ui"
+# Prefer WEB_ROOT in containers; fall back to monorepo apps/web next to apps/api
+_DEFAULT_WEB = Path(__file__).resolve().parents[1] / "web"
+UI_DIR = Path(os.getenv("WEB_ROOT", str(_DEFAULT_WEB)))
 
 logger = logging.getLogger(__name__)
 

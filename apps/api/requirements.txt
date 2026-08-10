@@ -1,5 +1,4 @@
-numpy>=1.26
-matplotlib>=3.8
+# API runtime deps (som-core installed separately from packages/som_core)
 fastapi>=0.115
 uvicorn[standard]>=0.30
 python-multipart>=0.0.9

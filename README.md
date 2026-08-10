@@ -1,6 +1,30 @@
 # Kohonen Self-Organising Map Platform
 
-End-to-end platform for training **Kohonen Self-Organising Maps (SOMs)** on numeric CSV datasets. It includes a vectorized training engine, a secured HTTP API, a web dashboard, object storage for plot artifacts, and Keycloak-based authentication.
+Monorepo for training **Kohonen Self-Organising Maps (SOMs)** on numeric CSV datasets. It includes a shared training library, a secured HTTP API, a web dashboard, object storage for plot artifacts, and Keycloak-based authentication.
+
+---
+
+## Monorepo layout
+
+```text
+kohonen/
+├── apps/
+│   ├── api/                 # FastAPI service (auth, train, MinIO upload)
+│   └── web/                 # Dashboard UI (static)
+├── packages/
+│   └── som_core/            # Shared SOM training library (pip-installable)
+├── infra/
+│   └── keycloak/            # Realm import (client + demo user)
+├── docker-compose.yml       # MinIO + Keycloak + API
+└── README.md
+```
+
+| Path | Responsibility |
+|------|----------------|
+| `packages/som_core` | Algorithm + CSV helpers (`SOM`, `train_som_from_csv`, …) |
+| `apps/api` | HTTP API, JWT validation, artifact upload |
+| `apps/web` | Login-gated dashboard |
+| `infra/keycloak` | IAM realm definition |
 
 ---
 
@@ -19,14 +43,14 @@ End-to-end platform for training **Kohonen Self-Organising Maps (SOMs)** on nume
 ## Architecture
 
 ```text
-Browser (UI)
+Browser (apps/web)
     │  Keycloak login (OIDC / PKCE)
     ▼
-FastAPI (som-api :8000)
+FastAPI (apps/api :8000)
     │  validates JWT via Keycloak JWKS
-    │  trains SOM (NumPy)
+    │  trains via packages/som_core
     ▼
-MinIO (:9010)  ← PNG artifacts (public read URLs returned in API response)
+MinIO (:9010)  ← PNG artifacts (URLs returned in API response)
 Keycloak (:8180)
 ```
 
@@ -171,20 +195,24 @@ curl -X POST "http://localhost:8000/som/train" \
 
 ---
 
-## Python library
+## Local Python development
 
-Core logic lives in [`kohonen.py`](kohonen.py).
+From the monorepo root:
 
-| Symbol                 | Purpose                                              |
-|------------------------|------------------------------------------------------|
-| `train`                | Original nested-loop RGB trainer (baseline)          |
-| `train_vectorized`     | Same semantics, NumPy-vectorized updates             |
-| `SOM`                  | Generic map for any `(N, D)` numeric matrix          |
-| `load_numeric_csv`     | Load features (+ optional label) from CSV            |
-| `train_som_from_csv`   | End-to-end: load → fit → plots → metrics             |
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e packages/som_core
+pip install -r apps/api/requirements.txt
+
+cd apps/api
+WEB_ROOT=../web uvicorn main:app --reload --port 8000
+```
+
+### Library usage
 
 ```python
-from kohonen import train_som_from_csv
+from som_core import train_som_from_csv, SOM
 
 result = train_som_from_csv(
     "path/to/data.csv",
@@ -199,32 +227,13 @@ result = train_som_from_csv(
 print(result["quantization_error"], result["artifacts"])
 ```
 
-Local install (optional, without Docker):
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
----
-
-## Project structure
-
-```text
-kohonen/
-├── api.py                 # FastAPI app (auth, train, UI, MinIO upload)
-├── kohonen.py             # SOM algorithms + CSV helper + train_som_from_csv
-├── ui/
-│   ├── index.html         # Dashboard
-│   └── vendor/            # Keycloak JS adapter
-├── keycloak/
-│   └── som-realm.json     # Realm, client, demo user
-├── Dockerfile
-├── docker-compose.yml
-├── requirements.txt
-└── README.md
-```
+| Symbol | Package | Purpose |
+|--------|---------|---------|
+| `train` | `som_core` | Original nested-loop RGB trainer (baseline) |
+| `train_vectorized` | `som_core` | Same semantics, NumPy-vectorized updates |
+| `SOM` | `som_core` | Generic map for any `(N, D)` numeric matrix |
+| `load_numeric_csv` | `som_core` | Load features (+ optional label) from CSV |
+| `train_som_from_csv` | `som_core` | End-to-end: load → fit → plots → metrics |
 
 ---
 
@@ -234,6 +243,7 @@ Environment variables for `som-api` (see `docker-compose.yml`):
 
 | Variable | Description |
 |----------|-------------|
+| `WEB_ROOT` | Path to dashboard static files |
 | `MINIO_ENDPOINT` | Internal MinIO host (`minio:9000`) |
 | `MINIO_PUBLIC_URL` | Browser-reachable MinIO base (`http://localhost:9010`) |
 | `MINIO_BUCKET` | Artifact bucket (`som-artifacts`) |
