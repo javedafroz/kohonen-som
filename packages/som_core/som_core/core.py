@@ -1,4 +1,5 @@
 # kohonen.py
+import json
 import logging
 import time
 from pathlib import Path
@@ -11,6 +12,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+MODEL_VERSION = "1.0.0"
 
 
 def train(input_data, n_max_iterations, width, height, log_every=None):
@@ -146,6 +149,9 @@ def load_numeric_csv(path, feature_columns=None, label_column=None):
             "encode categoricals before calling load_numeric_csv."
         ) from exc
 
+    if X.size == 0:
+        raise ValueError("CSV contains no data rows")
+
     y = None
     if label_column is not None:
         label_idx = header.index(label_column)
@@ -178,16 +184,32 @@ class SOM:
         seed=None,
         scale=True,
     ):
-        self.width = width
-        self.height = height
+        if int(width) < 2 or int(height) < 2:
+            raise ValueError("width and height must be >= 2")
+        if float(alpha0) <= 0:
+            raise ValueError("alpha0 must be > 0")
+        if n_features is not None and int(n_features) < 1:
+            raise ValueError("n_features must be >= 1")
+
+        self.width = int(width)
+        self.height = int(height)
         self.n_features = n_features
-        self.alpha0 = alpha0
-        self.scale = scale
+        self.alpha0 = float(alpha0)
+        self.scale = bool(scale)
+        self.seed = seed
         self.rng = np.random.default_rng(seed)
         self.weights = None
         self.mean_ = None
         self.std_ = None
-        self._xs, self._ys = np.indices((width, height))
+        self.feature_names = None
+        self.history_ = []
+        self.quantization_error_ = None
+        self.topographic_error_ = None
+        self._xs, self._ys = np.indices((self.width, self.height))
+
+    def _ensure_fitted(self):
+        if self.weights is None or self.mean_ is None or self.std_ is None:
+            raise RuntimeError("SOM must be fit (or loaded) before this operation")
 
     def _validate_X(self, X):
         X = np.asarray(X, dtype=float)
@@ -195,6 +217,8 @@ class SOM:
             raise ValueError(f"X must be 2-D (n_samples, n_features); got shape {X.shape}")
         if X.shape[0] == 0:
             raise ValueError("X must contain at least one sample")
+        if not np.isfinite(X).all():
+            raise ValueError("X contains NaN or Inf values")
         if self.n_features is not None and X.shape[1] != self.n_features:
             raise ValueError(
                 f"Expected {self.n_features} features, got {X.shape[1]}"
@@ -216,23 +240,29 @@ class SOM:
             raise RuntimeError("SOM must be fit before transforming data")
         return (X - self.mean_) / self.std_
 
-    def fit(self, X, n_iterations, log_every=None, online=False):
+    def fit(self, X, n_iterations, log_every=None, online=False, feature_names=None):
         """
         Train on any numeric matrix X with shape (n_samples, n_features).
 
         online=False: classic epoch-style pass over all samples each iteration
         online=True:  one random sample per iteration (better for large N)
         """
+        if int(n_iterations) < 1:
+            raise ValueError("n_iterations must be >= 1")
+        n_iterations = int(n_iterations)
+
         X = self._validate_X(X)
         self.n_features = X.shape[1]
+        if feature_names is not None:
+            self.feature_names = list(feature_names)
         if log_every is None:
             log_every = max(1, n_iterations // 10)
 
         X_scaled = self._fit_scaler(X)
-        # Init weights near data scale (scaled space ≈ N(0,1) when scale=True)
         self.weights = self.rng.normal(
             loc=0.0, scale=1.0, size=(self.width, self.height, self.n_features)
         )
+        self.history_ = []
 
         sigma0 = max(self.width, self.height) / 2
         if sigma0 <= 1:
@@ -266,6 +296,14 @@ class SOM:
 
             if t % log_every == 0 or t == n_iterations - 1:
                 qe = self._quantization_error_scaled(X_scaled)
+                self.history_.append(
+                    {
+                        "iteration": t + 1,
+                        "qe": float(qe),
+                        "sigma": float(sigma_t),
+                        "alpha": float(alpha_t),
+                    }
+                )
                 pct = 100.0 * (t + 1) / n_iterations
                 elapsed = time.perf_counter() - t0
                 logger.info(
@@ -279,7 +317,14 @@ class SOM:
                     elapsed,
                 )
 
-        logger.info("SOM fit done in %.1fs", time.perf_counter() - t0)
+        self.quantization_error_ = self._quantization_error_scaled(X_scaled)
+        self.topographic_error_ = self._topographic_error_scaled(X_scaled)
+        logger.info(
+            "SOM fit done in %.1fs QE=%.4f TE=%.4f",
+            time.perf_counter() - t0,
+            self.quantization_error_,
+            self.topographic_error_,
+        )
         return self
 
     def _update(self, vt, sigma_t, alpha_t):
@@ -291,15 +336,19 @@ class SOM:
 
     def bmu(self, x):
         """Return (x_idx, y_idx) BMU for a single feature vector."""
+        self._ensure_fitted()
         x = np.asarray(x, dtype=float).reshape(-1)
         if x.shape[0] != self.n_features:
             raise ValueError(f"Expected {self.n_features} features, got {x.shape[0]}")
+        if not np.isfinite(x).all():
+            raise ValueError("x contains NaN or Inf values")
         xs = self._transform_scale(x.reshape(1, -1))[0]
         idx = np.argmin(np.sum((self.weights - xs) ** 2, axis=2))
         return np.unravel_index(idx, (self.width, self.height))
 
     def transform(self, X):
         """Return BMU coordinates for each sample, shape (n_samples, 2)."""
+        self._ensure_fitted()
         X = self._validate_X(X)
         X_scaled = self._transform_scale(X)
         coords = np.empty((X_scaled.shape[0], 2), dtype=int)
@@ -309,6 +358,11 @@ class SOM:
             coords[i] = np.unravel_index(idx, (self.width, self.height))
         return coords
 
+    def predict(self, X):
+        """Return flat BMU indices for each sample, shape (n_samples,)."""
+        coords = self.transform(X)
+        return coords[:, 0] * self.height + coords[:, 1]
+
     def _quantization_error_scaled(self, X_scaled):
         flat_weights = self.weights.reshape(-1, self.n_features)
         errors = [
@@ -317,8 +371,87 @@ class SOM:
         return float(np.mean(errors))
 
     def quantization_error(self, X):
+        self._ensure_fitted()
         X = self._validate_X(X)
         return self._quantization_error_scaled(self._transform_scale(X))
+
+    def _topographic_error_scaled(self, X_scaled):
+        """Fraction of samples whose 1st and 2nd BMUs are not grid-adjacent."""
+        flat_weights = self.weights.reshape(-1, self.n_features)
+        n_nodes = flat_weights.shape[0]
+        if n_nodes < 2:
+            return 0.0
+
+        errors = 0
+        for vt in X_scaled:
+            dists = np.sum((flat_weights - vt) ** 2, axis=1)
+            bmu1, bmu2 = np.argpartition(dists, 1)[:2]
+            if dists[bmu1] > dists[bmu2]:
+                bmu1, bmu2 = bmu2, bmu1
+            x1, y1 = np.unravel_index(int(bmu1), (self.width, self.height))
+            x2, y2 = np.unravel_index(int(bmu2), (self.width, self.height))
+            # Adjacent if Chebyshev distance == 1 (8-neighbourhood)
+            if max(abs(x1 - x2), abs(y1 - y2)) > 1:
+                errors += 1
+        return float(errors / len(X_scaled))
+
+    def topographic_error(self, X):
+        self._ensure_fitted()
+        X = self._validate_X(X)
+        return self._topographic_error_scaled(self._transform_scale(X))
+
+    def save(self, path):
+        """Persist model weights, scaler, and metadata to a .npz archive."""
+        self._ensure_fitted()
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        meta = {
+            "version": MODEL_VERSION,
+            "width": self.width,
+            "height": self.height,
+            "n_features": self.n_features,
+            "alpha0": self.alpha0,
+            "scale": self.scale,
+            "seed": self.seed,
+            "feature_names": self.feature_names,
+            "history": self.history_,
+            "quantization_error": self.quantization_error_,
+            "topographic_error": self.topographic_error_,
+        }
+        np.savez_compressed(
+            path,
+            weights=self.weights,
+            mean_=self.mean_,
+            std_=self.std_,
+            meta_json=np.array(json.dumps(meta)),
+        )
+        logger.info("Saved SOM model to %s", path)
+        return path
+
+    @classmethod
+    def load(cls, path):
+        """Load a model previously written by `save`."""
+        path = Path(path)
+        with np.load(path, allow_pickle=False) as data:
+            meta = json.loads(data["meta_json"].item())
+            som = cls(
+                width=meta["width"],
+                height=meta["height"],
+                n_features=meta["n_features"],
+                alpha0=meta["alpha0"],
+                seed=meta.get("seed"),
+                scale=meta["scale"],
+            )
+            som.weights = data["weights"]
+            som.mean_ = data["mean_"]
+            som.std_ = data["std_"]
+            som.feature_names = meta.get("feature_names")
+            som.history_ = meta.get("history") or []
+            som.quantization_error_ = meta.get("quantization_error")
+            som.topographic_error_ = meta.get("topographic_error")
+        logger.info("Loaded SOM model from %s", path)
+        return som
 
 
 def plot_component_planes(weights, feature_names, path):
@@ -389,37 +522,15 @@ def train_som_from_csv(
     online=False,
     output_dir=".",
     alpha0=0.1,
+    model_path=None,
 ):
     """
-    End-to-end API: load a CSV, train a SOM, save plots, return metrics.
-
-    Parameters
-    ----------
-    csv_path : str | Path
-        Path to the CSV file.
-    feature_columns : list[str]
-        Numeric feature column names.
-    label_column : str | None
-        Optional label column (used only for BMU coloring, not training).
-    width, height : int
-        SOM grid size.
-    n_iterations : int
-        Training iterations.
-    seed : int | None
-        RNG seed for reproducibility.
-    scale : bool
-        If True, z-score features before training.
-    online : bool
-        If True, one random sample per iteration (better for large N).
-    output_dir : str | Path
-        Directory for plot artifacts.
-    alpha0 : float
-        Initial learning rate.
+    End-to-end API: load a CSV, train a SOM, save plots/model, return metrics.
 
     Returns
     -------
     dict
-        Metrics, artifact paths, and the fitted SOM instance under key "som".
+        Metrics, artifact paths, history, and the fitted SOM under key "som".
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -437,14 +548,26 @@ def train_som_from_csv(
         scale=scale,
         alpha0=alpha0,
     )
-    som.fit(X, n_iterations=n_iterations, online=online)
+    som.fit(
+        X,
+        n_iterations=n_iterations,
+        online=online,
+        feature_names=feature_names,
+    )
     coords = som.transform(X)
-    qe = som.quantization_error(X)
+    qe = float(som.quantization_error_)
+    te = float(som.topographic_error_)
 
     components_path = output_dir / "som_components.png"
     bmu_path = output_dir / "som_bmu.png"
     plot_component_planes(som.weights, feature_names, components_path)
     plot_bmu_labels(coords, y, som.width, som.height, bmu_path)
+
+    if model_path is None:
+        model_path = output_dir / "model.npz"
+    else:
+        model_path = Path(model_path)
+    som.save(model_path)
 
     result = {
         "n_samples": int(X.shape[0]),
@@ -454,19 +577,24 @@ def train_som_from_csv(
         "map_size": [width, height],
         "n_iterations": n_iterations,
         "online": online,
-        "quantization_error": float(qe),
+        "quantization_error": qe,
+        "topographic_error": te,
+        "history": list(som.history_),
         "weights_shape": list(som.weights.shape),
         "bmu_coords": coords,
+        "model_path": str(model_path),
         "artifacts": {
             "components": str(components_path),
             "bmu": str(bmu_path),
+            "model": str(model_path),
         },
         "som": som,
     }
     logger.info(
-        "train_som_from_csv done: samples=%s features=%s QE=%.4f",
+        "train_som_from_csv done: samples=%s features=%s QE=%.4f TE=%.4f",
         result["n_samples"],
         result["n_features"],
         result["quantization_error"],
+        result["topographic_error"],
     )
     return result

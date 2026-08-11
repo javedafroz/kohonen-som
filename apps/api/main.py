@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import jwt
+import numpy as np
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -23,7 +24,7 @@ from jwt import PyJWKClient
 from minio import Minio
 from minio.error import S3Error
 
-from som_core import train_som_from_csv
+from som_core import SOM, load_numeric_csv, train_som_from_csv
 
 # Prefer WEB_ROOT in containers; fall back to monorepo apps/web next to apps/api
 _DEFAULT_WEB = Path(__file__).resolve().parents[1] / "web"
@@ -32,6 +33,7 @@ UI_DIR = Path(os.getenv("WEB_ROOT", str(_DEFAULT_WEB)))
 logger = logging.getLogger(__name__)
 
 ARTIFACT_ROOT = Path(os.getenv("ARTIFACT_ROOT", "/app/artifacts"))
+MODEL_CACHE_ROOT = Path(os.getenv("MODEL_CACHE_ROOT", str(ARTIFACT_ROOT / "models")))
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
@@ -88,17 +90,98 @@ def ensure_bucket(client: Minio, bucket: str) -> None:
     client.set_bucket_policy(bucket, json.dumps(policy))
 
 
-def upload_artifact(local_path: Path, object_key: str) -> dict:
+def upload_artifact(
+    local_path: Path,
+    object_key: str,
+    content_type: str = "application/octet-stream",
+) -> dict:
     client = get_minio()
     client.fput_object(
         MINIO_BUCKET,
         object_key,
         str(local_path),
-        content_type="image/png",
+        content_type=content_type,
     )
     path = f"s3://{MINIO_BUCKET}/{object_key}"
     url = f"{MINIO_PUBLIC_URL}/{MINIO_BUCKET}/{object_key}"
     return {"path": path, "object_key": object_key, "url": url}
+
+
+def _model_object_keys(model_id: str) -> dict[str, str]:
+    prefix = f"models/{model_id}"
+    return {
+        "model": f"{prefix}/model.npz",
+        "meta": f"{prefix}/meta.json",
+    }
+
+
+def _write_meta_json(path: Path, meta: dict[str, Any]) -> None:
+    path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+
+def _download_model_artifacts(model_id: str) -> tuple[Path, dict[str, Any]]:
+    """Download model.npz + meta.json from MinIO into a local cache dir."""
+    keys = _model_object_keys(model_id)
+    cache_dir = MODEL_CACHE_ROOT / model_id
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    model_path = cache_dir / "model.npz"
+    meta_path = cache_dir / "meta.json"
+    client = get_minio()
+    try:
+        client.fget_object(MINIO_BUCKET, keys["model"], str(model_path))
+        client.fget_object(MINIO_BUCKET, keys["meta"], str(meta_path))
+    except S3Error as exc:
+        if exc.code in {"NoSuchKey", "NoSuchBucket"}:
+            raise FileNotFoundError(f"Model {model_id!r} not found") from exc
+        raise
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    return model_path, meta
+
+
+def _load_inference_matrix(
+    *,
+    csv_path: Path | None,
+    rows_json: str | None,
+    feature_columns: list[str] | None,
+    meta: dict[str, Any],
+) -> tuple[Any, list[str]]:
+    """Build a feature matrix from CSV upload or JSON rows."""
+    expected = list(meta.get("feature_columns") or [])
+    if csv_path is not None:
+        columns = feature_columns or expected
+        if not columns:
+            raise ValueError("feature_columns required when model metadata has none")
+        X, _, names = load_numeric_csv(csv_path, feature_columns=columns)
+        return X, list(names)
+
+    if not rows_json:
+        raise ValueError("Provide a CSV file or JSON rows")
+    try:
+        rows = json.loads(rows_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON rows: {exc}") from exc
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("rows must be a non-empty JSON array")
+
+    columns = feature_columns or expected
+    if not columns:
+        raise ValueError("feature_columns required when model metadata has none")
+
+    if isinstance(rows[0], dict):
+        missing = [c for c in columns if c not in rows[0]]
+        if missing:
+            raise ValueError(f"JSON rows missing columns: {missing}")
+        matrix = [[float(row[c]) for c in columns] for row in rows]
+    elif isinstance(rows[0], (list, tuple)):
+        matrix = [[float(v) for v in row] for row in rows]
+        if any(len(row) != len(columns) for row in matrix):
+            raise ValueError(
+                f"Each row must have {len(columns)} values matching feature_columns"
+            )
+    else:
+        raise ValueError("rows must be an array of objects or arrays")
+
+    return np.asarray(matrix, dtype=float), columns
 
 
 def _run_training_job(
@@ -118,6 +201,7 @@ def _run_training_job(
     requested_by: str | None,
 ) -> dict[str, Any]:
     """Blocking train + MinIO upload (runs in a worker thread)."""
+    model_id = job_id
     result = train_som_from_csv(
         csv_path,
         feature_columns=columns,
@@ -130,18 +214,61 @@ def _run_training_job(
         online=online,
         alpha0=alpha0,
         output_dir=job_dir,
+        model_path=job_dir / "model.npz",
     )
 
     components_local = Path(result["artifacts"]["components"])
     bmu_local = Path(result["artifacts"]["bmu"])
+    model_local = Path(result["artifacts"]["model"])
+    keys = _model_object_keys(model_id)
+
+    created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    meta = {
+        "model_id": model_id,
+        "job_id": job_id,
+        "requested_by": requested_by,
+        "created_at": created_at,
+        "n_samples": result["n_samples"],
+        "n_features": result["n_features"],
+        "feature_columns": result["feature_columns"],
+        "label_column": result["label_column"],
+        "map_size": result["map_size"],
+        "n_iterations": result["n_iterations"],
+        "online": result["online"],
+        "quantization_error": result["quantization_error"],
+        "topographic_error": result["topographic_error"],
+        "history": result["history"],
+        "weights_shape": result["weights_shape"],
+        "version": "1.0.0",
+    }
+    meta_path = job_dir / "meta.json"
+    _write_meta_json(meta_path, meta)
+
     artifacts = {
         "components": upload_artifact(
-            components_local, f"{job_id}/som_components.png"
+            components_local,
+            f"{job_id}/som_components.png",
+            content_type="image/png",
         ),
-        "bmu": upload_artifact(bmu_local, f"{job_id}/som_bmu.png"),
+        "bmu": upload_artifact(
+            bmu_local,
+            f"{job_id}/som_bmu.png",
+            content_type="image/png",
+        ),
+        "model": upload_artifact(
+            model_local,
+            keys["model"],
+            content_type="application/octet-stream",
+        ),
+        "meta": upload_artifact(
+            meta_path,
+            keys["meta"],
+            content_type="application/json",
+        ),
     }
     return {
         "job_id": job_id,
+        "model_id": model_id,
         "requested_by": requested_by,
         "n_samples": result["n_samples"],
         "n_features": result["n_features"],
@@ -151,10 +278,11 @@ def _run_training_job(
         "n_iterations": result["n_iterations"],
         "online": result["online"],
         "quantization_error": result["quantization_error"],
+        "topographic_error": result["topographic_error"],
+        "history": result["history"],
         "weights_shape": result["weights_shape"],
         "artifacts": artifacts,
     }
-
 
 def verify_token(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
@@ -186,6 +314,7 @@ def verify_token(
 async def lifespan(_app: FastAPI):
     global minio_client, jwks_client, train_semaphore, train_executor
     ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
+    MODEL_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     train_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TRAINS)
     train_executor = ThreadPoolExecutor(
         max_workers=TRAIN_THREAD_WORKERS,
@@ -376,6 +505,142 @@ async def som_train(
         train_semaphore.release()
 
     return payload
+
+
+@app.get("/som/models/{model_id}")
+def get_model(
+    model_id: str,
+    user: Annotated[dict[str, Any], Depends(verify_token)],
+):
+    """Return persisted model metadata from MinIO."""
+    _ = user
+    try:
+        _, meta = _download_model_artifacts(model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except S3Error as exc:
+        raise HTTPException(
+            status_code=502, detail=f"MinIO download failed: {exc}"
+        ) from exc
+    return meta
+
+
+@app.post("/som/models/{model_id}/transform")
+async def model_transform(
+    model_id: str,
+    user: Annotated[dict[str, Any], Depends(verify_token)],
+    file: UploadFile | None = File(None, description="CSV with header row"),
+    rows: str | None = Form(
+        None,
+        description='JSON array of objects or arrays, e.g. [{"a":1,"b":2}]',
+    ),
+    feature_columns: str | None = Form(
+        None,
+        description="Optional override; defaults to columns stored with the model",
+    ),
+):
+    """Map samples to BMU coordinates using a persisted model."""
+    _ = user
+    return await _run_inference(
+        model_id=model_id,
+        file=file,
+        rows=rows,
+        feature_columns=feature_columns,
+        mode="transform",
+    )
+
+
+@app.post("/som/models/{model_id}/predict")
+async def model_predict(
+    model_id: str,
+    user: Annotated[dict[str, Any], Depends(verify_token)],
+    file: UploadFile | None = File(None, description="CSV with header row"),
+    rows: str | None = Form(
+        None,
+        description='JSON array of objects or arrays, e.g. [{"a":1,"b":2}]',
+    ),
+    feature_columns: str | None = Form(
+        None,
+        description="Optional override; defaults to columns stored with the model",
+    ),
+):
+    """Map samples to flat BMU indices using a persisted model."""
+    _ = user
+    return await _run_inference(
+        model_id=model_id,
+        file=file,
+        rows=rows,
+        feature_columns=feature_columns,
+        mode="predict",
+    )
+
+
+async def _run_inference(
+    *,
+    model_id: str,
+    file: UploadFile | None,
+    rows: str | None,
+    feature_columns: str | None,
+    mode: str,
+) -> dict[str, Any]:
+    columns = _parse_feature_columns(feature_columns) if feature_columns else None
+    tmp_csv: Path | None = None
+    if file is not None and file.filename:
+        infer_dir = ARTIFACT_ROOT / "infer" / uuid.uuid4().hex[:12]
+        infer_dir.mkdir(parents=True, exist_ok=True)
+        suffix = Path(file.filename).suffix or ".csv"
+        tmp_csv = infer_dir / f"input{suffix}"
+        try:
+            with tmp_csv.open("wb") as out:
+                shutil.copyfileobj(file.file, out)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=400, detail=f"Failed to store upload: {exc}"
+            ) from exc
+
+    if tmp_csv is None and not rows:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide a CSV file upload or Form field 'rows' (JSON)",
+        )
+
+    loop = asyncio.get_running_loop()
+
+    def _infer() -> dict[str, Any]:
+        model_path, meta = _download_model_artifacts(model_id)
+        som = SOM.load(model_path)
+        X, used_columns = _load_inference_matrix(
+            csv_path=tmp_csv,
+            rows_json=rows,
+            feature_columns=columns,
+            meta=meta,
+        )
+        if mode == "predict":
+            values = som.predict(X).tolist()
+            key = "bmu_indices"
+        else:
+            values = som.transform(X).tolist()
+            key = "bmu_coords"
+        return {
+            "model_id": model_id,
+            "n_samples": int(X.shape[0]),
+            "feature_columns": used_columns,
+            "map_size": [som.width, som.height],
+            key: values,
+        }
+
+    try:
+        return await loop.run_in_executor(None, _infer)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except S3Error as exc:
+        raise HTTPException(
+            status_code=502, detail=f"MinIO download failed: {exc}"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 def _parse_feature_columns(raw: str) -> list[str]:

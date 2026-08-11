@@ -7,7 +7,6 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <!-- keycloak-js loaded as ESM below -->
   <style>
     :root {
       --bg: #f3efe6;
@@ -41,7 +40,7 @@
     }
 
     header {
-      margin-bottom: 2rem;
+      margin-bottom: 1.25rem;
       display: flex;
       justify-content: space-between;
       gap: 1rem;
@@ -86,6 +85,37 @@
       font-weight: 500;
     }
 
+    .tabs {
+      display: flex;
+      gap: 0;
+      margin-bottom: 1.5rem;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .tabs button {
+      margin: 0;
+      width: auto;
+      flex: 0 0 auto;
+      background: transparent;
+      color: var(--muted);
+      border: none;
+      border-bottom: 2px solid transparent;
+      border-radius: 0;
+      padding: 0.7rem 1.15rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+
+    .tabs button:hover:not(:disabled) {
+      filter: none;
+      color: var(--ink);
+    }
+
+    .tabs button[aria-selected="true"] {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+
     .layout {
       display: grid;
       gap: 1.5rem;
@@ -127,6 +157,7 @@
     input[type="text"],
     input[type="number"],
     input[type="file"],
+    select,
     textarea {
       width: 100%;
       font: inherit;
@@ -337,6 +368,47 @@
       font-weight: 600;
       margin-bottom: 0.15rem;
     }
+
+    .score-table-wrap {
+      overflow-x: auto;
+      margin-top: 0.25rem;
+    }
+
+    table.score-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+      font-family: "IBM Plex Mono", monospace;
+    }
+
+    table.score-table th,
+    table.score-table td {
+      border: 1px solid var(--line);
+      padding: 0.4rem 0.55rem;
+      text-align: left;
+    }
+
+    table.score-table th {
+      background: #faf7f0;
+      font-family: "IBM Plex Sans", sans-serif;
+      font-weight: 600;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+    }
+
+    .meta-chip {
+      margin: 0 0 1rem;
+      font-size: 0.8rem;
+      font-family: "IBM Plex Mono", monospace;
+      color: var(--muted);
+    }
+
+    .meta-chip strong {
+      color: var(--ink);
+      font-weight: 600;
+    }
   </style>
 </head>
 <body>
@@ -346,7 +418,7 @@
     <header>
       <div>
         <h1>Kohonen SOM</h1>
-        <p>Upload a numeric CSV, choose features, train a self-organising map, and inspect the MinIO artifacts.</p>
+        <p>Train a self-organising map from a CSV, then score new rows with a saved model.</p>
       </div>
       <div class="user-bar">
         <span id="username"></span>
@@ -354,70 +426,132 @@
       </div>
     </header>
 
-    <div class="layout">
-      <section class="panel">
-        <h2>Train</h2>
-        <form id="train-form">
-          <label for="file">CSV file</label>
-          <input id="file" name="file" type="file" accept=".csv,text/csv" required />
+    <nav class="tabs" role="tablist" aria-label="Main">
+      <button type="button" role="tab" id="tab-train" aria-controls="panel-train" aria-selected="true">Train</button>
+      <button type="button" role="tab" id="tab-predict" aria-controls="panel-predict" aria-selected="false">Predict</button>
+    </nav>
 
-          <label for="feature_columns">Feature columns</label>
-          <textarea id="feature_columns" name="feature_columns" required placeholder="sepal_length, sepal_width, petal_length, petal_width"></textarea>
-          <p class="hint">Comma-separated or JSON array. Must be numeric columns.</p>
+    <div id="panel-train" role="tabpanel" aria-labelledby="tab-train">
+      <div class="layout">
+        <section class="panel">
+          <h2>Train</h2>
+          <form id="train-form">
+            <label for="file">CSV file</label>
+            <input id="file" name="file" type="file" accept=".csv,text/csv" required />
 
-          <label for="label_column">Label column (optional)</label>
-          <input id="label_column" name="label_column" type="text" placeholder="species" />
+            <label for="feature_columns">Feature columns</label>
+            <textarea id="feature_columns" name="feature_columns" required placeholder="sepal_length, sepal_width, petal_length, petal_width"></textarea>
+            <p class="hint">Comma-separated or JSON array. Must be numeric columns.</p>
 
-          <div class="grid-2">
-            <div>
-              <label for="width">Width</label>
-              <input id="width" name="width" type="number" min="2" value="10" required />
+            <label for="label_column">Label column (optional)</label>
+            <input id="label_column" name="label_column" type="text" placeholder="species" />
+
+            <div class="grid-2">
+              <div>
+                <label for="width">Width</label>
+                <input id="width" name="width" type="number" min="2" value="10" required />
+              </div>
+              <div>
+                <label for="height">Height</label>
+                <input id="height" name="height" type="number" min="2" value="10" required />
+              </div>
             </div>
+
+            <div class="grid-2">
+              <div>
+                <label for="n_iterations">Iterations</label>
+                <input id="n_iterations" name="n_iterations" type="number" min="1" value="500" required />
+              </div>
+              <div>
+                <label for="seed">Seed</label>
+                <input id="seed" name="seed" type="number" value="42" />
+              </div>
+            </div>
+
+            <div class="checks">
+              <label><input type="checkbox" id="scale" checked /> Scale features</label>
+              <label><input type="checkbox" id="online" /> Online sampling</label>
+            </div>
+
+            <div class="btn-row">
+              <button id="submit" type="submit">Submit</button>
+              <div id="btn-spinner" class="spinner hidden" aria-hidden="true"></div>
+            </div>
+            <div id="status" class="status" aria-live="polite"></div>
+          </form>
+        </section>
+
+        <section class="panel">
+          <h2>Results</h2>
+          <div id="empty" class="empty">No run yet. Submit a CSV to see component planes and BMU projection.</div>
+          <div id="loading" class="loading-panel hidden" role="status" aria-live="polite">
+            <div class="spinner" aria-hidden="true"></div>
             <div>
-              <label for="height">Height</label>
-              <input id="height" name="height" type="number" min="2" value="10" required />
+              <strong>Training SOM…</strong>
+              Fitting the map and uploading artifacts to MinIO.
             </div>
           </div>
+          <div id="results" class="hidden">
+            <div class="metrics" id="metrics"></div>
+            <div class="gallery" id="gallery"></div>
+          </div>
+        </section>
+      </div>
+    </div>
 
-          <div class="grid-2">
-            <div>
-              <label for="n_iterations">Iterations</label>
-              <input id="n_iterations" name="n_iterations" type="number" min="1" value="500" required />
+    <div id="panel-predict" role="tabpanel" aria-labelledby="tab-predict" class="hidden">
+      <div class="layout">
+        <section class="panel">
+          <h2>Predict</h2>
+          <p class="meta-chip" id="predict-last">Last trained model: <strong>—</strong></p>
+          <form id="predict-form">
+            <label for="model_id">Model ID</label>
+            <input id="model_id" name="model_id" type="text" required placeholder="e.g. 9cd0b11aca2e" autocomplete="off" />
+            <p class="hint">Filled automatically after training; you can also paste any saved model id.</p>
+
+            <label for="predict_file">CSV file</label>
+            <input id="predict_file" name="predict_file" type="file" accept=".csv,text/csv" required />
+
+            <label for="predict_feature_columns">Feature columns (optional)</label>
+            <textarea id="predict_feature_columns" name="predict_feature_columns" placeholder="Leave blank to use columns stored with the model"></textarea>
+
+            <label for="predict_mode">Output</label>
+            <select id="predict_mode" name="predict_mode">
+              <option value="transform">BMU coordinates (x, y)</option>
+              <option value="predict">Flat BMU indices</option>
+            </select>
+
+            <div class="btn-row">
+              <button id="predict-submit" type="submit">Score</button>
+              <div id="predict-spinner" class="spinner hidden" aria-hidden="true"></div>
             </div>
+            <div id="predict-status" class="status" aria-live="polite"></div>
+          </form>
+        </section>
+
+        <section class="panel">
+          <h2>Predictions</h2>
+          <div id="predict-empty" class="empty">Enter a model id and CSV to score samples against a saved SOM.</div>
+          <div id="predict-loading" class="loading-panel hidden" role="status" aria-live="polite">
+            <div class="spinner" aria-hidden="true"></div>
             <div>
-              <label for="seed">Seed</label>
-              <input id="seed" name="seed" type="number" value="42" />
+              <strong>Scoring…</strong>
+              Loading the model from MinIO and mapping BMUs.
             </div>
           </div>
-
-          <div class="checks">
-            <label><input type="checkbox" id="scale" checked /> Scale features</label>
-            <label><input type="checkbox" id="online" /> Online sampling</label>
+          <div id="predict-results" class="hidden">
+            <div class="metrics" id="predict-metrics"></div>
+            <div class="score-table-wrap" id="predict-table-wrap">
+              <table class="score-table" id="predict-table">
+                <thead>
+                  <tr id="predict-table-head"><th>#</th><th>BMU x</th><th>BMU y</th></tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
           </div>
-
-          <div class="btn-row">
-            <button id="submit" type="submit">Submit</button>
-            <div id="btn-spinner" class="spinner hidden" aria-hidden="true"></div>
-          </div>
-          <div id="status" class="status" aria-live="polite"></div>
-        </form>
-      </section>
-
-      <section class="panel">
-        <h2>Results</h2>
-        <div id="empty" class="empty">No run yet. Submit a CSV to see component planes and BMU projection.</div>
-        <div id="loading" class="loading-panel hidden" role="status" aria-live="polite">
-          <div class="spinner" aria-hidden="true"></div>
-          <div>
-            <strong>Training SOM…</strong>
-            Fitting the map and uploading artifacts to MinIO.
-          </div>
-        </div>
-        <div id="results" class="hidden">
-          <div class="metrics" id="metrics"></div>
-          <div class="gallery" id="gallery"></div>
-        </div>
-      </section>
+        </section>
+      </div>
     </div>
   </div>
 
@@ -438,7 +572,34 @@
     const usernameEl = document.getElementById("username");
     const logoutBtn = document.getElementById("logout");
 
+    const tabTrain = document.getElementById("tab-train");
+    const tabPredict = document.getElementById("tab-predict");
+    const panelTrain = document.getElementById("panel-train");
+    const panelPredict = document.getElementById("panel-predict");
+
+    const predictForm = document.getElementById("predict-form");
+    const predictSubmit = document.getElementById("predict-submit");
+    const predictSpinner = document.getElementById("predict-spinner");
+    const predictStatus = document.getElementById("predict-status");
+    const predictLastEl = document.getElementById("predict-last");
+    const modelIdInput = document.getElementById("model_id");
+    const predictEmpty = document.getElementById("predict-empty");
+    const predictLoading = document.getElementById("predict-loading");
+    const predictResults = document.getElementById("predict-results");
+    const predictMetrics = document.getElementById("predict-metrics");
+    const predictTableHead = document.getElementById("predict-table-head");
+    const predictTableBody = document.querySelector("#predict-table tbody");
+
     let keycloak = null;
+    let lastModelId = null;
+
+    function setActiveTab(name) {
+      const isTrain = name === "train";
+      tabTrain.setAttribute("aria-selected", String(isTrain));
+      tabPredict.setAttribute("aria-selected", String(!isTrain));
+      panelTrain.classList.toggle("hidden", !isTrain);
+      panelPredict.classList.toggle("hidden", isTrain);
+    }
 
     function setLoading(isLoading) {
       submitBtn.disabled = isLoading;
@@ -456,6 +617,11 @@
     function setStatus(message, kind) {
       statusEl.textContent = message;
       statusEl.className = "status" + (kind ? " " + kind : "");
+    }
+
+    function setPredictStatus(message, kind) {
+      predictStatus.textContent = message;
+      predictStatus.className = "status" + (kind ? " " + kind : "");
     }
 
     function metric(label, value) {
@@ -486,7 +652,39 @@
       return "Request failed";
     }
 
-    // Break iss= redirect loops left by incompatible adapters / interrupted logins
+    function rememberModel(modelId) {
+      lastModelId = modelId || null;
+      predictLastEl.innerHTML = lastModelId
+        ? `Last trained model: <strong>${lastModelId}</strong>`
+        : "Last trained model: <strong>—</strong>";
+      if (lastModelId && !modelIdInput.value.trim()) {
+        modelIdInput.value = lastModelId;
+      } else if (lastModelId) {
+        modelIdInput.value = lastModelId;
+      }
+    }
+
+    function renderPredictTable(mode, values) {
+      predictTableBody.innerHTML = "";
+      const limit = Math.min(values.length, 50);
+      if (mode === "predict") {
+        predictTableHead.innerHTML = "<th>#</th><th>BMU index</th>";
+        for (let i = 0; i < limit; i++) {
+          const row = document.createElement("tr");
+          row.innerHTML = `<td>${i}</td><td>${values[i]}</td>`;
+          predictTableBody.appendChild(row);
+        }
+      } else {
+        predictTableHead.innerHTML = "<th>#</th><th>BMU x</th><th>BMU y</th>";
+        for (let i = 0; i < limit; i++) {
+          const row = document.createElement("tr");
+          row.innerHTML = `<td>${i}</td><td>${values[i][0]}</td><td>${values[i][1]}</td>`;
+          predictTableBody.appendChild(row);
+        }
+      }
+      return values.length > limit;
+    }
+
     function clearBrokenAuthUrl() {
       const hash = window.location.hash.startsWith("#")
         ? window.location.hash.slice(1)
@@ -532,7 +730,6 @@
         onLoad: "login-required",
         pkceMethod: "S256",
         checkLoginIframe: false,
-        // Avoid fragment/iss loops with Keycloak 26
         responseMode: "query",
       });
 
@@ -541,7 +738,6 @@
         return;
       }
 
-      // Strip leftover OIDC callback params from the address bar
       if (window.location.search || window.location.hash) {
         history.replaceState(null, "", window.location.pathname);
       }
@@ -550,6 +746,9 @@
       bootEl.classList.add("hidden");
       appEl.classList.remove("hidden");
     }
+
+    tabTrain.addEventListener("click", () => setActiveTab("train"));
+    tabPredict.addEventListener("click", () => setActiveTab("predict"));
 
     logoutBtn.addEventListener("click", () => {
       keycloak.logout({ redirectUri: window.location.origin + "/" });
@@ -589,12 +788,14 @@
         }
 
         metricsEl.innerHTML = "";
+        metricsEl.appendChild(metric("Model", data.model_id || data.job_id));
         metricsEl.appendChild(metric("Job", data.job_id));
         metricsEl.appendChild(metric("User", data.requested_by || "—"));
         metricsEl.appendChild(metric("Samples", data.n_samples));
         metricsEl.appendChild(metric("Features", data.n_features));
         metricsEl.appendChild(metric("Map", data.map_size.join("×")));
         metricsEl.appendChild(metric("QE", Number(data.quantization_error).toFixed(4)));
+        metricsEl.appendChild(metric("TE", Number(data.topographic_error ?? 0).toFixed(4)));
 
         galleryEl.innerHTML = "";
         if (data.artifacts?.components) {
@@ -604,14 +805,79 @@
           galleryEl.appendChild(figure("BMU projection", data.artifacts.bmu));
         }
 
+        rememberModel(data.model_id || data.job_id);
         resultsEl.classList.remove("hidden");
-        setStatus("Done.", "ok");
+        setStatus("Done. Switch to Predict to score new data.", "ok");
       } catch (err) {
         emptyEl.classList.remove("hidden");
         const message = typeof err.message === "string" ? err.message : "Training failed";
         setStatus(message, "error");
       } finally {
         setLoading(false);
+      }
+    });
+
+    predictForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const modelId = modelIdInput.value.trim();
+      if (!modelId) {
+        setPredictStatus("Enter a model id.", "error");
+        return;
+      }
+      const fileInput = document.getElementById("predict_file");
+      if (!fileInput.files.length) {
+        setPredictStatus("Choose a CSV file.", "error");
+        return;
+      }
+
+      const mode = document.getElementById("predict_mode").value;
+      const body = new FormData();
+      body.append("file", fileInput.files[0]);
+      const cols = document.getElementById("predict_feature_columns").value.trim();
+      if (cols) body.append("feature_columns", cols);
+
+      predictSubmit.disabled = true;
+      predictSpinner.classList.remove("hidden");
+      predictEmpty.classList.add("hidden");
+      predictResults.classList.add("hidden");
+      predictLoading.classList.remove("hidden");
+      setPredictStatus("Scoring…", "");
+
+      try {
+        const headers = await authHeader();
+        const res = await fetch(`/som/models/${encodeURIComponent(modelId)}/${mode}`, {
+          method: "POST",
+          body,
+          headers,
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(formatError(data.detail) || res.statusText);
+        }
+
+        const values = mode === "predict" ? (data.bmu_indices || []) : (data.bmu_coords || []);
+        predictMetrics.innerHTML = "";
+        predictMetrics.appendChild(metric("Model", data.model_id || modelId));
+        predictMetrics.appendChild(metric("Samples", data.n_samples));
+        predictMetrics.appendChild(metric("Map", (data.map_size || []).join("×") || "—"));
+        predictMetrics.appendChild(metric("Features", (data.feature_columns || []).length));
+
+        const truncated = renderPredictTable(mode, values);
+        predictResults.classList.remove("hidden");
+        setPredictStatus(
+          truncated
+            ? `Showing first 50 of ${values.length} samples.`
+            : `Scored ${data.n_samples} samples.`,
+          "ok",
+        );
+      } catch (err) {
+        predictEmpty.classList.remove("hidden");
+        const message = typeof err.message === "string" ? err.message : "Scoring failed";
+        setPredictStatus(message, "error");
+      } finally {
+        predictSubmit.disabled = false;
+        predictSpinner.classList.add("hidden");
+        predictLoading.classList.add("hidden");
       }
     });
 

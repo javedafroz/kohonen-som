@@ -31,16 +31,30 @@ kohonen/
 ## Features
 
 - **Vectorized SOM training** for arbitrary numeric feature matrices `(N × D)`
-- **CSV → train → visualize** pipeline via `train_som_from_csv`
-- **Web dashboard** to upload data, configure hyperparameters, and view results
-- **REST API** (`POST /som/train`) with JWT protection
-- **MinIO** storage for component-plane and BMU plot artifacts
+- **CSV → train → visualize → persist** pipeline via `train_som_from_csv` / `SOM.save`
+- **Inference API** separated from training (`transform` / `predict` on saved models)
+- **Topographic error** + per-iteration `history_` (QE, σ, α)
+- **Web dashboard** to upload data, configure hyperparameters, view results, and score with the last model
+- **REST API** with JWT protection (`POST /som/train`, model GET/infer routes)
+- **MinIO** storage for plot PNGs and model artifacts (`model.npz` + `meta.json`)
 - **Keycloak IAM** login before dashboard access
 - Baseline RGB demos preserved (`train` / `train_vectorized`) for the original challenge comparison
 
 ---
 
 ## Architecture
+
+```mermaid
+flowchart TB
+  Dataset[CSV Dataset] --> Validate[Validate and scale]
+  Validate --> Train[SOM.fit]
+  Train --> Eval[QE TE history]
+  Eval --> Artifact[Model artifact npz plus meta json]
+  Artifact --> MinIO[MinIO models bucket]
+  MinIO --> InferAPI["POST /som/models/id/transform"]
+  TrainAPI["POST /som/train"] --> Train
+  TrainAPI --> MinIO
+```
 
 ```mermaid
 flowchart TB
@@ -59,10 +73,10 @@ flowchart TB
   end
 
   Browser -->|"OIDC / PKCE login"| KC
-  Browser -->|"JWT + train request"| API
+  Browser -->|"JWT + train / infer"| API
   API -->|"Validate JWT via JWKS"| KC
-  API -->|"Train SOM"| Core
-  API -->|"Upload PNG artifacts"| MinIO
+  API -->|"Train / load SOM"| Core
+  API -->|"Upload plots + models"| MinIO
   Browser -->|"Fetch artifact URLs"| MinIO
 ```
 
@@ -112,13 +126,16 @@ docker compose down
 
 ## Using the dashboard
 
+The UI has two tabs: **Train** and **Predict**.
+
 1. Sign in with Keycloak (`demo` / `demo`).
-2. Upload a CSV with a header row (features must be numeric).
+2. On **Train**, upload a CSV with a header row (features must be numeric).
 3. Enter feature columns (comma-separated or JSON array).
 4. Optionally set a label column (used only for BMU coloring).
 5. Configure map size, iterations, seed, scaling, and online sampling.
 6. Click **Submit** — a loader shows while training runs.
-7. View metrics and MinIO-backed plots (component planes + BMU projection).
+7. View metrics (`model_id`, QE, TE) and MinIO-backed plots (component planes + BMU projection).
+8. Switch to **Predict**, confirm/paste a `model_id` (auto-filled after training), upload a CSV, and score via `/transform` or `/predict`.
 
 **Example (Iris):**
 
@@ -145,10 +162,13 @@ Interactive docs: http://localhost:8000/docs
 
 Require `Authorization: Bearer <access_token>`.
 
-| Method | Path         | Description                          |
-|--------|--------------|--------------------------------------|
-| `GET`  | `/me`        | Current user claims                  |
-| `POST` | `/som/train` | Train SOM from uploaded CSV          |
+| Method | Path                                 | Description                                      |
+|--------|--------------------------------------|--------------------------------------------------|
+| `GET`  | `/me`                                | Current user claims                              |
+| `POST` | `/som/train`                         | Train SOM from uploaded CSV; persist model       |
+| `GET`  | `/som/models/{model_id}`             | Load model `meta.json` from MinIO                |
+| `POST` | `/som/models/{model_id}/transform`   | Score rows → BMU coordinates `(x, y)`            |
+| `POST` | `/som/models/{model_id}/predict`     | Score rows → flat BMU indices                    |
 
 ### Train request (multipart form)
 
@@ -164,27 +184,59 @@ Require `Authorization: Bearer <access_token>`.
 | `online`           | no       | One random sample per iteration (default `false`)|
 | `alpha0`           | no       | Initial learning rate (default `0.1`)            |
 
-### Example response (`artifacts`)
+### Example train response
 
 ```json
 {
   "job_id": "9cd0b11aca2e",
+  "model_id": "9cd0b11aca2e",
   "requested_by": "demo",
   "quantization_error": 0.38,
+  "topographic_error": 0.12,
+  "history": [{"iteration": 1, "qe": 1.2, "sigma": 5.0, "alpha": 0.1}],
   "artifacts": {
     "components": {
       "path": "s3://som-artifacts/9cd0b11aca2e/som_components.png",
-      "object_key": "9cd0b11aca2e/som_components.png",
       "url": "http://localhost:9010/som-artifacts/9cd0b11aca2e/som_components.png"
     },
     "bmu": {
       "path": "s3://som-artifacts/9cd0b11aca2e/som_bmu.png",
-      "object_key": "9cd0b11aca2e/som_bmu.png",
       "url": "http://localhost:9010/som-artifacts/9cd0b11aca2e/som_bmu.png"
+    },
+    "model": {
+      "path": "s3://som-artifacts/models/9cd0b11aca2e/model.npz",
+      "url": "http://localhost:9010/som-artifacts/models/9cd0b11aca2e/model.npz"
+    },
+    "meta": {
+      "path": "s3://som-artifacts/models/9cd0b11aca2e/meta.json",
+      "url": "http://localhost:9010/som-artifacts/models/9cd0b11aca2e/meta.json"
     }
   }
 }
 ```
+
+### Model artifact layout (MinIO)
+
+```text
+som-artifacts/
+├── {job_id}/som_components.png
+├── {job_id}/som_bmu.png
+└── models/{model_id}/
+    ├── model.npz      # weights, scaler, embedded meta
+    └── meta.json      # metrics, schema, requester, timestamps
+```
+
+`model_id` equals `job_id` so plots and the model share one namespace.
+
+### Inference request
+
+Multipart form on `/transform` or `/predict`:
+
+| Field             | Required | Description                                         |
+|-------------------|----------|-----------------------------------------------------|
+| `file`            | one of   | CSV with the same feature columns as training       |
+| `rows`            | one of   | JSON array of objects or numeric arrays             |
+| `feature_columns` | no       | Override; defaults to columns stored in `meta.json` |
 
 ### Example `curl` (password grant for automation)
 
@@ -216,9 +268,18 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e packages/som_core
 pip install -r apps/api/requirements.txt
+pip install -r apps/api/requirements-dev.txt
 
 cd apps/api
 WEB_ROOT=../web uvicorn main:app --reload --port 8000
+```
+
+### Tests
+
+```bash
+pip install -e packages/som_core
+pip install -r apps/api/requirements-dev.txt
+pytest packages/som_core/tests -q
 ```
 
 ### Library usage
@@ -236,16 +297,19 @@ result = train_som_from_csv(
     seed=42,
     output_dir="./out",
 )
-print(result["quantization_error"], result["artifacts"])
+print(result["quantization_error"], result["topographic_error"], result["artifacts"])
+
+som = SOM.load("./out/model.npz")
+coords = som.transform([[1.0, 2.0, 3.0]])
 ```
 
 | Symbol | Package | Purpose |
 |--------|---------|---------|
 | `train` | `som_core` | Original nested-loop RGB trainer (baseline) |
 | `train_vectorized` | `som_core` | Same semantics, NumPy-vectorized updates |
-| `SOM` | `som_core` | Generic map for any `(N, D)` numeric matrix |
+| `SOM` | `som_core` | Generic map: fit / transform / predict / save / load |
 | `load_numeric_csv` | `som_core` | Load features (+ optional label) from CSV |
-| `train_som_from_csv` | `som_core` | End-to-end: load → fit → plots → metrics |
+| `train_som_from_csv` | `som_core` | End-to-end: load → fit → plots → model → metrics |
 
 ---
 

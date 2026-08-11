@@ -1,0 +1,2 @@
+# Dev / test dependencies for the API and som_core package
+pytest>=8.0
